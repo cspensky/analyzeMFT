@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 # Author: David Kovar [dkovar <at> gmail [dot] com]
-# Name: mft.py
+# Name: analyzeMFT.py
 #
 # Copyright (c) 2010 David Kovar. All rights reserved.
 # This software is distributed under the Common Public License 1.0
@@ -9,23 +9,54 @@
 # Date: May 2013
 #
 
-import sys
 import struct
 import mftutils
 import binascii
-from optparse import OptionParser
 import ctypes
 import bitparse
 
+
+
+
+# Attribute TYPE MAPPING
+ATTRIBUTE_TYPE_TABLE = {
+                  0x10:'Standard Information',
+                  0x20:'Attribute List',
+                  0x30:'Filename',
+                  0x40:'Object ID',
+                  0x50:'Security Descriptor',
+                  0x60:'Volume Name',
+                  0x70:'Volume Information',
+                  0x80:'Data',
+                  0x90:'Index Root',
+                  0xA0:'Index Allocation',
+                  0xB0:'Bitmap',
+                  0xC0:'Reparse Point',
+                  0xD0:'EA Information',
+                  0xE0:'EA',
+                  0xF0:'Property Set',
+                  0x100:'Logged Tool Stream'
+                  }
+
+# modified because this code seems to mess with other option parsing
+default_opt = type('AnonClass', (object,), {"debug": False, 
+                                            "localtz": None,
+                                            "bodystd": False,
+                                            "bodyfull": False})
+
 def set_default_options():
 
-    parser = OptionParser()
-    parser.set_defaults(debug=False)
-    parser.set_defaults(localtz=None)
-    parser.set_defaults(bodystd=False)
-    parser.set_defaults(bodyfull=False)
-    (options,args) = parser.parse_args()
-    return options
+#     parser = OptionParser()
+#     parser.set_defaults(debug=False)
+#     parser.set_defaults(localtz=None)
+#     parser.set_defaults(bodystd=False)
+#     parser.set_defaults(bodyfull=False)
+#     (options,args) = parser.parse_args()
+#     return options
+
+    global default_opt
+    return default_opt
+
 
 def parse_record(raw_record, options):
 
@@ -39,7 +70,7 @@ def parse_record(raw_record, options):
 
     # HACK: Apply the NTFS fixup on a 1024 byte record.
     # Note that the fixup is only applied locally to this function.
-    if (record['seq_number'] == raw_record[510:512] and 
+    if (record['seq_number'] == raw_record[510:512] and
         record['seq_number'] == raw_record[1022:1024]):
         raw_record = "%s%s%s%s" % (raw_record[:510],
                                    record['seq_attr1'],
@@ -47,6 +78,8 @@ def parse_record(raw_record, options):
                                    record['seq_attr2'])
 
     record_number = record['recordnum']
+
+    record['attributes'] = []
 
     if options.debug:
         print '-->Record number: %d\n\tMagic: %s Attribute offset: %d Flags: %s Size:%d' % (record_number, record['magic'],
@@ -79,6 +112,9 @@ def parse_record(raw_record, options):
         else:
             ATRrecord['name'] = ''
 
+        # add attributes to a list
+        record['attributes'].append(ATRrecord)
+
         if options.debug:
             print "Attribute type: %x Length: %d Res: %x" % (ATRrecord['type'], ATRrecord['len'], ATRrecord['res'])
 
@@ -95,15 +131,21 @@ def parse_record(raw_record, options):
         elif ATRrecord['type'] == 0x20:                 # Attribute list
             if options.debug:
                 print "Attribute list"
+
+            record['attribute_list'] = ATRrecord
             if ATRrecord['res'] == 0:
-                ALrecord = decodeAttributeList(raw_record[read_ptr+ATRrecord['soff']:], record)
-                record['al'] = ALrecord
-                if options.debug:
-                    print "Name: %s"  % (ALrecord['name'])
+                ALrecords = decodeAttributeList(raw_record[read_ptr+ATRrecord['soff']:], ATRrecord['ssize'])
+                record['attribute_list']['records'] = ALrecords
+#                if options.debug:
+#                    print "Name: %s"  % (ALrecord['name'])
             else:
+                
+            # TODO handle non-resident attribute lists
                 if options.debug:
                     print "Non-resident Attribute List?"
-                record['al'] = None
+                record['attribute_list']['records'] = 'Non-resident'
+            
+            record['attributes'][-1] = record['attribute_list']
 
         elif ATRrecord['type'] == 0x30:                 # File name
             if options.debug: print "File name record"
@@ -190,14 +232,48 @@ def parse_record(raw_record, options):
             if options.debug: print "ATRrecord->len < 0, exiting loop"
             break
 
-
-    if options.anomaly:
-        anomalyDetect(record)
-        
     return record
 
 
-def mft_to_csv(record, ret_header,options):
+def parse_nonresident_attributes(raw_record):
+    """
+    Parses attributes from raw data -- works well for nonresident attributes (they don't seem to have MFT headers)
+    
+    Only parses attribute lists in detail right now
+    """
+    record = {}
+    record['attributes'] = []
+    
+    read_ptr = 0
+    
+    while read_ptr < len(raw_record):
+        ATRrecord = decodeATRHeader(raw_record[read_ptr:])
+        if ATRrecord['type'] == 0xffffffff:             # End of attributes
+            break
+
+        # add attributes to a list
+        record['attributes'].append(ATRrecord)
+
+        if ATRrecord['type'] == 0x20:                 # Attribute list
+
+            record['attribute_list'] = ATRrecord
+
+            ALrecords = decodeAttributeList(raw_record[read_ptr+ATRrecord['soff']:], ATRrecord['ssize'])
+            record['attribute_list']['records'] = ALrecords
+
+            record['attributes'][-1] = record['attribute_list']
+            
+            
+        # advance read_ptr
+        if ATRrecord['len'] > 0:
+            read_ptr = read_ptr + ATRrecord['len']
+        else:
+            if options.debug: print "ATRrecord->len < 0, exiting loop"
+            break
+        
+    return record
+
+def mft_to_csv(record, ret_header):
     'Return a MFT record in CSV format'
 
     mftBuffer = ''
@@ -246,29 +322,15 @@ def mft_to_csv(record, ret_header,options):
         csv_string.extend(['NoParent', 'NoParent'])
 
     if record['fncnt'] > 0 and 'si' in record:
-        if options.excel:
-            filenameBuffer = [record['filename'], str('=\"'+record['si']['crtime'].dtstr+'\"'),
-                       '=\"'+record['si']['mtime'].dtstr+'\"', '=\"'+record['si']['atime'].dtstr+'\"',
-                       '=\"'+record['si']['ctime'].dtstr+'\"',
-                       '=\"'+record['fn',0]['crtime'].dtstr+'\"', '=\"'+record['fn',0]['mtime'].dtstr+'\"',
-                       '=\"'+record['fn',0]['atime'].dtstr+'\"', '=\"'+record['fn',0]['ctime'].dtstr+'\"']
-        else:
-            filenameBuffer = [record['filename'], str(record['si']['crtime'].dtstr),
-                       record['si']['mtime'].dtstr, record['si']['atime'].dtstr, record['si']['ctime'].dtstr,
-                       record['fn',0]['crtime'].dtstr, record['fn',0]['mtime'].dtstr,
-                       record['fn',0]['atime'].dtstr, record['fn',0]['ctime'].dtstr] 
-            
+        #filenameBuffer = [FNrecord['name'], str(record['si']['crtime'].dtstr),
+        filenameBuffer = [record['filename'], str(record['si']['crtime'].dtstr),
+                   record['si']['mtime'].dtstr, record['si']['atime'].dtstr, record['si']['ctime'].dtstr,
+                   record['fn',0]['crtime'].dtstr, record['fn',0]['mtime'].dtstr,
+                   record['fn',0]['atime'].dtstr, record['fn',0]['ctime'].dtstr]
     elif 'si' in record:
-        if options.excel:
-            filenameBuffer = ['NoFNRecord', str('=\"'+record['si']['crtime'].dtstr+'\"'),
-                       '=\"'+record['si']['mtime'].dtstr+'\"', '=\"'+record['si']['atime'].dtstr+'\"',
-                       '=\"'+record['si']['ctime'].dtstr+'\"',
-                       'NoFNRecord', 'NoFNRecord', 'NoFNRecord','NoFNRecord']
-        else:
-            filenameBuffer = ['NoFNRecord', str(record['si']['crtime'].dtstr),
-                       record['si']['mtime'].dtstr, record['si']['atime'].dtstr, record['si']['ctime'].dtstr,
-                       'NoFNRecord', 'NoFNRecord', 'NoFNRecord','NoFNRecord']
-
+        filenameBuffer = ['NoFNRecord', str(record['si']['crtime'].dtstr),
+                   record['si']['mtime'].dtstr, record['si']['atime'].dtstr, record['si']['ctime'].dtstr,
+                   'NoFNRecord', 'NoFNRecord', 'NoFNRecord','NoFNRecord']
     else:
         filenameBuffer = ['NoFNRecord', 'NoSIRecord', 'NoSIRecord', 'NoSIRecord', 'NoSIRecord',
                    'NoFNRecord', 'NoFNRecord', 'NoFNRecord','NoFNRecord']
@@ -519,6 +581,12 @@ def decodeMFTrecordtype(record):
     return tmpBuffer
 
 def decodeATRHeader(s):
+    """
+        Decode an attribute's standard header.
+        Now corrected to handle named vs non-named attributes correctly.
+    """
+    
+    #http://ftp.kolibrios.org/users/Asper/docs/NTFS/ntfsdoc.html#concept_attribute_header
 
     d = {}
     d['type'] = struct.unpack("<L",s[:4])[0]
@@ -546,12 +614,30 @@ def decodeATRHeader(s):
         d['allocsize'] = struct.unpack("<Lxxxx",s[40:48])[0]    # n64AllocSize
         d['realsize'] = struct.unpack("<Lxxxx",s[48:56])[0]     # n64RealSize
         d['streamsize'] = struct.unpack("<Lxxxx",s[56:64])[0]   # n64StreamSize
-        (d['ndataruns'],d['dataruns'],d['drunerror']) = unpack_dataruns(s[64:])        
+        
+        # correct the offset for the datarun based on whether or not the attribute is named
+        
+        # runlist offset is normally 64 (0x40) BUT IT CAN BE DIFFERENT!!
+        # use d['run_off']
+        datarun_offset = d['run_off']
+#        print "datarun offset is %d" % datarun_offset            
+#        (d['ndataruns'],d['dataruns'],d['drunerror']) = unpack_dataruns(s[64:])        
+        (d['ndataruns'],d['dataruns'],d['drunerror']) = unpack_dataruns(s[datarun_offset:])
+
+    # deal with name vs non-named attribute
+    if d['nlen'] > 0:
+        bytes = s[d['name_off']:d['name_off'] + d['nlen']*2]
+        d['name'] = bytes.decode('utf-16').encode('utf-8')
+#        bytes = raw_record[read_ptr+ATRrecord['name_off']:read_ptr+ATRrecord['name_off'] + ATRrecord['nlen']*2]
+#        ATRrecord['name'] = bytes.decode('utf-16').encode('utf-8')
+    else:
+        d['name'] = ''
+
 
     return d
 
 # Dataruns - http://inform.pucp.edu.pe/~inf232/Ntfs/ntfs_doc_v0.5/concepts/data_runs.html
-def unpack_dataruns(str):
+def unpack_dataruns(raw_str):
     
     dataruns = []
     numruns = 0
@@ -576,34 +662,44 @@ def unpack_dataruns(str):
     #mftutils.hexdump(str,':',16)
 
     while (True):
-        lengths.asbyte = struct.unpack("B",str[pos])[0]
+        lengths.asbyte = struct.unpack("B",raw_str[pos])[0]
+#        print "Looking at %s" % hex(lengths.asbyte)
         pos += 1
         if lengths.asbyte == 0x00:
             break
     
-        if (lengths.b.lenlen > 6 or lengths.b.lenlen == 0):
+#        if (lengths.b.lenlen > 6 or lengths.b.lenlen == 0):
+#            error = "Datarun oddity."
+#            break
+
+        if (lengths.b.lenlen == 0):
             error = "Datarun oddity."
             break
 
-        len = bitparse.parse_little_endian_signed(str[pos:pos+lengths.b.lenlen])
 
-        # print lengths.b.lenlen, lengths.b.offlen, len
+        len = bitparse.parse_little_endian_signed(raw_str[pos:pos+lengths.b.lenlen])
+
         pos += lengths.b.lenlen
         
         if (lengths.b.offlen > 0):
-            offset = bitparse.parse_little_endian_signed(str[pos:pos+lengths.b.offlen])
+            offset = bitparse.parse_little_endian_signed(raw_str[pos:pos+lengths.b.offlen])
+            
+#            print "Got offset of %d" % offset
+            
             offset = offset + prevoffset
             prevoffset = offset
             pos += lengths.b.offlen
         else: # Sparse
-            offset = 0
-            pos += 1            
+#            print "Found sparse data run.  Next 10 bytes of string are %s" % repr(str[pos:pos+10])
+            offset = 'sparse'
+            # Increasing pos by 1 seems to be a bug here
+#            pos += 1            
 
         dataruns.append([len, offset])
         numruns += 1
         
                 
-        # print "Lenlen: %d Offlen: %d Len: %d Offset: %d" % (lengths.b.lenlen, lengths.b.offlen, len, offset)
+#        print "Lenlen: %d Offlen: %d Len: %d Offset: %s" % (lengths.b.lenlen, lengths.b.offlen, len, str(offset))
 
     return numruns, dataruns, error
 
@@ -651,7 +747,31 @@ def decodeFNAttribute(s, localtz, record):
 
     return d
 
-def decodeAttributeList(s, record):
+
+def decodeAttributeList(s, list_size):
+    """
+    Decode an AttributeList attribute -- composed of list of
+    AttributeListRecords
+    
+    The binary string s should NOT include the AttributeList header
+    """
+    
+    # return a list of AttributeListRecords
+    
+    al_records = []
+    
+    read_ptr = 0
+    end_ptr = list_size
+
+    while read_ptr < end_ptr:
+        alr = decodeAttributeListRecord(s[read_ptr:])
+        read_ptr += alr['len']
+        al_records.append(alr)
+
+    return al_records
+
+
+def decodeAttributeListRecord(s):
 
     hexFlag = False
 
@@ -659,16 +779,22 @@ def decodeAttributeList(s, record):
     d['type'] = struct.unpack("<I",s[:4])[0]                # 4
     d['len'] = struct.unpack("<H",s[4:6])[0]                # 2
     d['nlen'] = struct.unpack("B",s[6])[0]                  # 1
-    d['f1'] = struct.unpack("B",s[7])[0]                    # 1
+    d['name_off'] = struct.unpack("B",s[7])[0]                    # 1
     d['start_vcn'] = struct.unpack("<d",s[8:16])[0]         # 8
-    d['file_ref'] = struct.unpack("<Lxx",s[16:22])[0]       # 6
+    d['mft_record_no'] = struct.unpack("<Lxx",s[16:22])[0]       # 6
     d['seq'] = struct.unpack("<H",s[22:24])[0]              # 2
     d['id'] = struct.unpack("<H",s[24:26])[0]               # 4
     
-    bytes = s[26:26 + d['nlen']*2]
-    d['name'] = bytes.decode('utf-16').encode('utf-8')
+    if d['nlen'] > 0:
+        bytes = s[26:26 + d['nlen']*2]
+        d['name'] = bytes.decode('utf-16').encode('utf-8')
+    else:
+        d['name'] = ""
 
     return d
+
+
+
 
 def decodeVolumeInfo(s,options):
 
@@ -718,24 +844,3 @@ def ObjectID(s):
             binascii.hexlify(s[6:8]),binascii.hexlify(s[8:10]),binascii.hexlify(s[10:16]))
 
     return objstr
-
-
-def anomalyDetect(record):
-     
-     
-     # Check for STD create times that are before the FN create times
-     if record['fncnt'] > 0:
-#          print record['si']['crtime'].dt, record['fn', 0]['crtime'].dt
-          
-          try:
-               if (record['fn', 0]['crtime'].dt == 0) or (record['si']['crtime'].dt < record['fn', 0]['crtime'].dt):
-                    record['stf-fn-shift'] = True
-          # This is a kludge - there seem to be some legit files that trigger an exception in the above. Needs to be
-          # investigated
-          except:
-               record['stf-fn-shift'] = True
-     
-          # Check for STD create times with a nanosecond value of '0'
-          if record['fn',0]['crtime'].dt != 0:
-               if record['fn',0]['crtime'].dt.microsecond == 0:
-                    record['usec-zero'] = True
