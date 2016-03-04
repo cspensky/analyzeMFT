@@ -1,0 +1,31 @@
+Source: lophi-analyzemft
+Maintainer: Chad Spensky <cspensky@cs.ucsb.edu>
+Section: python
+Priority: optional
+Build-Depends: python-all (>= 2.6.6-3), debhelper (>= 7.4.3)
+Standards-Version: 3.9.1
+
+Package: python-lophi-analyzemft
+Architecture: all
+Depends: ${misc:Depends}, ${python:Depends}
+Description: Analyze the $MFT from a NTFS filesystem.
+ ===========
+ Analyze MFT
+ ===========
+ .
+ analyzeMFT.py is designed to fully parse the MFT file from an NTFS filesystem
+ and present the results as accurately as possible in multiple formats.
+ .
+ Installation
+ ===========
+ You should now be able to install analyzeMFT with pip:
+ .
+     pip install analyzeMFT
+ .
+ Alternatively:
+ .
+     git pull https://github.com/dkovar/analyzeMFT.git
+     python setup.py install (or, just run it from that directory)
+ .
+ Usage
+ ===========
