@@ -1,5 +1,5 @@
 Source: lophi-analyzemft
-Maintainer: Chad Spensky <cspensky@cs.ucsb.edu>
+Maintainer: Chad Spensky <lophi@mit.edu>
 Section: python
 Priority: optional
 Build-Depends: python-all (>= 2.6.6-3), debhelper (>= 7.4.3)
